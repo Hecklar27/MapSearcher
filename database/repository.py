@@ -115,6 +115,15 @@ class ImageRepository:
                     results.append(search_result)
                 
                 self.logger.info(f"Vector search returned {len(results)} results")
+                
+                # If vector search returns no results but we have images in database,
+                # fallback to manual similarity calculation
+                if len(results) == 0:
+                    total_images = await self.get_image_count()
+                    if total_images > 0:
+                        self.logger.warning(f"Vector search returned 0 results but database has {total_images} images. Falling back to manual similarity.")
+                        return await self._fallback_similarity_search(query_embedding, limit)
+                
                 return results
                 
         except Exception as e:

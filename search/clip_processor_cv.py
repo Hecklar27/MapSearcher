@@ -49,29 +49,17 @@ class CLIPProcessor:
         # Convert BGR to HSV for better color representation
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        # Also use RGB for additional color information
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        
-        # Calculate histograms for HSV channels with more bins for better discrimination
-        h_hist = cv2.calcHist([hsv], [0], None, [60], [0, 180])  # Hue - more bins
-        s_hist = cv2.calcHist([hsv], [1], None, [40], [0, 256])  # Saturation
-        v_hist = cv2.calcHist([hsv], [2], None, [40], [0, 256])  # Value
-        
-        # RGB histograms for additional color info
-        r_hist = cv2.calcHist([rgb], [0], None, [30], [0, 256])  # Red
-        g_hist = cv2.calcHist([rgb], [1], None, [30], [0, 256])  # Green
-        b_hist = cv2.calcHist([rgb], [2], None, [30], [0, 256])  # Blue
+        # Calculate histograms for each channel
+        h_hist = cv2.calcHist([hsv], [0], None, [50], [0, 180])  # Hue
+        s_hist = cv2.calcHist([hsv], [1], None, [50], [0, 256])  # Saturation
+        v_hist = cv2.calcHist([hsv], [2], None, [50], [0, 256])  # Value
         
         # Normalize histograms
         h_hist = h_hist.flatten() / (h_hist.sum() + 1e-7)
         s_hist = s_hist.flatten() / (s_hist.sum() + 1e-7)
         v_hist = v_hist.flatten() / (v_hist.sum() + 1e-7)
-        r_hist = r_hist.flatten() / (r_hist.sum() + 1e-7)
-        g_hist = g_hist.flatten() / (g_hist.sum() + 1e-7)
-        b_hist = b_hist.flatten() / (b_hist.sum() + 1e-7)
         
-        # Combine all color histograms
-        return np.concatenate([h_hist, s_hist, v_hist, r_hist, g_hist, b_hist])
+        return np.concatenate([h_hist, s_hist, v_hist])
     
     def _extract_edge_features(self, image: np.ndarray) -> np.ndarray:
         """Extract edge-based features"""
@@ -157,22 +145,10 @@ class CLIPProcessor:
                 cv_image = cv2.resize(cv_image, (224, 224))
                 
                 # Extract different types of features
-                color_features = self._extract_color_histogram(cv_image)      # 240 dims (60+40+40+30+30+30)
+                color_features = self._extract_color_histogram(cv_image)      # 150 dims
                 edge_features = self._extract_edge_features(cv_image)         # 16 dims  
                 texture_features = self._extract_texture_features(cv_image)   # 10 dims
                 spatial_features = self._extract_spatial_features(cv_image)   # 7 dims
-                
-                # Weight different feature types for better discrimination
-                color_weight = 2.0      # Color is important for map art
-                edge_weight = 1.5       # Edges help distinguish structures
-                texture_weight = 1.0    # Texture provides detail info
-                spatial_weight = 0.5    # Spatial layout less critical
-                
-                # Apply weights
-                color_features = color_features * color_weight
-                edge_features = edge_features * edge_weight
-                texture_features = texture_features * texture_weight
-                spatial_features = spatial_features * spatial_weight
                 
                 # Combine all features
                 combined_features = np.concatenate([
@@ -182,33 +158,23 @@ class CLIPProcessor:
                     spatial_features
                 ])
                 
-                # Current total: ~273 dimensions, need to pad to 512
                 # Pad or truncate to exactly 512 dimensions
                 if len(combined_features) < 512:
-                    # Pad with additional image statistics
+                    # Pad with image statistics
                     padding_size = 512 - len(combined_features)
                     gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
                     
-                    # Add more discriminative statistical features as padding
+                    # Add statistical features as padding
                     stats = []
                     for i in range(padding_size):
-                        if i % 8 == 0:
+                        if i % 4 == 0:
                             stats.append(np.mean(gray))
-                        elif i % 8 == 1:
+                        elif i % 4 == 1:
                             stats.append(np.std(gray))
-                        elif i % 8 == 2:
+                        elif i % 4 == 2:
                             stats.append(np.min(gray))
-                        elif i % 8 == 3:
-                            stats.append(np.max(gray))
-                        elif i % 8 == 4:
-                            stats.append(np.median(gray))
-                        elif i % 8 == 5:
-                            stats.append(np.percentile(gray, 25))
-                        elif i % 8 == 6:
-                            stats.append(np.percentile(gray, 75))
                         else:
-                            # Add some randomness based on image content
-                            stats.append(np.sum(gray[::10, ::10]) % 256)
+                            stats.append(np.max(gray))
                     
                     combined_features = np.concatenate([combined_features, stats[:padding_size]])
                 else:
