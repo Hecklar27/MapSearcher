@@ -1,0 +1,21 @@
+# Core bot framework
+discord.py>=2.3.0
+
+# AI/ML stack
+torch>=2.0.0
+open-clip-torch>=2.20.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# Database
+motor>=3.3.0
+pymongo>=4.5.0
+
+# Utilities
+python-dotenv>=1.0.0
+aiohttp>=3.8.0
+
+# Development and testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0 
