@@ -86,7 +86,7 @@ class ImageRepository:
                 pipeline = [
                     {
                         "$vectorSearch": {
-                            "index": "vector_index",  # Name of vector search index
+                            "index": "vector_search",  # Updated to match actual index name
                             "path": "clip_embedding",
                             "queryVector": query_embedding,
                             "numCandidates": limit * 10,  # Search more candidates for better results
@@ -143,10 +143,10 @@ class ImageRepository:
             List of search results with similarity scores
         """
         try:
-            self.logger.warning("Using fallback similarity search")
+            self.logger.warning("Using fallback similarity search - vector search index not available")
             
-            # Get all documents (limit to reasonable number for performance)
-            cursor = self.collection.find({}).limit(1000)
+            # Get all documents (for better accuracy, process all images, not just first 1000)
+            cursor = self.collection.find({})
             
             results = []
             query_np = EmbeddingUtils.list_to_numpy(query_embedding)
@@ -166,7 +166,24 @@ class ImageRepository:
             
             # Sort by similarity and return top results
             results.sort(key=lambda x: x.similarity_score, reverse=True)
-            return results[:limit]
+            
+            # Only return results above a certain threshold for better quality
+            min_threshold = 0.3  # Only return results with at least 30% similarity
+            filtered_results = [r for r in results if r.similarity_score >= min_threshold]
+            
+            # If no results above threshold, return top results anyway (but limit to reasonable similarity)
+            if not filtered_results and results:
+                # Return top results but log that they may be poor matches
+                self.logger.warning(f"No high-quality matches found. Best similarity: {results[0].similarity_score:.3f}")
+                filtered_results = results[:limit]
+            
+            final_results = filtered_results[:limit]
+            
+            if final_results:
+                best_score = final_results[0].similarity_score
+                self.logger.info(f"Fallback search: found {len(final_results)} results, best similarity: {best_score:.3f}")
+            
+            return final_results
             
         except Exception as e:
             self.logger.error(f"Fallback similarity search failed: {e}")

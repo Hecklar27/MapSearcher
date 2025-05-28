@@ -74,51 +74,94 @@ class CLIPProcessor:
         return np.concatenate([h_hist, s_hist, v_hist, r_hist, g_hist, b_hist])
     
     def _extract_edge_features(self, image: np.ndarray) -> np.ndarray:
-        """Extract edge-based features"""
-        # Convert to grayscale
+        """Extract edge-based features (deterministic)"""
+        # Convert to grayscale for consistent processing
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
-        # Apply Canny edge detection
-        edges = cv2.Canny(gray, 50, 150)
+        # Use Canny edge detection with fixed parameters for consistency
+        # Apply slight blur first for stability
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        edges = cv2.Canny(blurred, 50, 150)
         
-        # Calculate edge density in different regions
-        h, w = edges.shape
-        regions = []
+        # Calculate edge statistics
+        edge_density = np.sum(edges > 0) / edges.size
         
-        # Divide image into 4x4 grid and calculate edge density
-        for i in range(4):
-            for j in range(4):
-                y1, y2 = i * h // 4, (i + 1) * h // 4
-                x1, x2 = j * w // 4, (j + 1) * w // 4
-                region = edges[y1:y2, x1:x2]
-                density = np.sum(region > 0) / (region.size + 1)
-                regions.append(density)
-        
-        return np.array(regions)
-    
-    def _extract_texture_features(self, image: np.ndarray) -> np.ndarray:
-        """Extract texture features using Local Binary Patterns"""
-        # Convert to grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        # Simple texture analysis using gradient magnitudes
+        # Gradient-based features using Sobel
         grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
         grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
         magnitude = np.sqrt(grad_x**2 + grad_y**2)
         
-        # Calculate texture statistics
-        mean_mag = np.mean(magnitude)
-        std_mag = np.std(magnitude)
+        # Calculate gradient statistics
+        features = [
+            edge_density,
+            np.mean(magnitude),
+            np.std(magnitude),
+            np.max(magnitude),
+            np.sum(magnitude > np.percentile(magnitude, 90)) / magnitude.size,
+        ]
         
-        # Histogram of gradient orientations
+        # Histogram of gradient orientations (deterministic binning)
         angles = np.arctan2(grad_y, grad_x)
         angle_hist, _ = np.histogram(angles, bins=8, range=(-np.pi, np.pi))
-        angle_hist = angle_hist / (angle_hist.sum() + 1e-7)
+        # Normalize histogram safely
+        hist_sum = np.sum(angle_hist)
+        if hist_sum > 0:
+            angle_hist = angle_hist / hist_sum
+        else:
+            angle_hist = np.zeros(8)  # Fallback for empty histograms
         
-        return np.concatenate([[mean_mag, std_mag], angle_hist])
+        # Combine all features
+        all_features = features + angle_hist.tolist()
+        
+        # Ensure all features are finite and consistent
+        safe_features = []
+        for feature in all_features:
+            if np.isnan(feature) or np.isinf(feature):
+                safe_features.append(0.0)
+            else:
+                safe_features.append(float(feature))
+        
+        return np.array(safe_features, dtype=np.float32)
+    
+    def _extract_texture_features(self, image: np.ndarray) -> np.ndarray:
+        """Extract texture features using Local Binary Pattern (deterministic)"""
+        # Convert to grayscale for consistent processing
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # Simple texture analysis using gradient statistics
+        # Use Sobel instead of Canny for more deterministic results
+        grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        
+        # Calculate gradient magnitude
+        magnitude = np.sqrt(grad_x**2 + grad_y**2)
+        
+        # Statistical features (ensure consistent calculation)
+        features = [
+            np.mean(magnitude),
+            np.std(magnitude),
+            np.min(magnitude),
+            np.max(magnitude),
+            np.median(magnitude),
+            np.percentile(magnitude, 25),
+            np.percentile(magnitude, 75),
+            np.mean(np.abs(grad_x)),
+            np.mean(np.abs(grad_y)),
+            np.std(gray)  # Overall intensity variation
+        ]
+        
+        # Ensure all features are finite and deterministic
+        safe_features = []
+        for feature in features:
+            if np.isnan(feature) or np.isinf(feature):
+                safe_features.append(0.0)
+            else:
+                safe_features.append(float(feature))
+        
+        return np.array(safe_features, dtype=np.float32)
     
     def _extract_spatial_features(self, image: np.ndarray) -> np.ndarray:
-        """Extract spatial layout features"""
+        """Extract spatial layout features (deterministic)"""
         # Convert to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
@@ -128,14 +171,143 @@ class CLIPProcessor:
         # Hu moments (scale, rotation, translation invariant)
         hu_moments = cv2.HuMoments(moments).flatten()
         
-        # Handle log transformation safely
-        hu_moments = np.where(hu_moments > 0, -np.sign(hu_moments) * np.log10(np.abs(hu_moments)), 0)
+        # Handle log transformation safely and deterministically
+        # Replace any problematic values with consistent defaults
+        safe_hu_moments = []
+        for moment in hu_moments:
+            if moment == 0 or np.isnan(moment) or np.isinf(moment):
+                safe_hu_moments.append(0.0)  # Consistent default
+            elif moment > 0:
+                safe_hu_moments.append(-np.log10(moment))
+            else:
+                safe_hu_moments.append(np.log10(-moment))
         
-        return hu_moments
+        return np.array(safe_hu_moments, dtype=np.float32)
+    
+    def _extract_detailed_color_features(self, image: np.ndarray) -> np.ndarray:
+        """Extract high-resolution color features (192 dimensions)"""
+        # 1. RGB histograms with more bins (64 + 64 + 64 = 192 dims)
+        b, g, r = cv2.split(image)
+        
+        # Higher resolution histograms for better discrimination
+        hist_r = cv2.calcHist([r], [0], None, [64], [0, 256])
+        hist_g = cv2.calcHist([g], [0], None, [64], [0, 256])
+        hist_b = cv2.calcHist([b], [0], None, [64], [0, 256])
+        
+        # Normalize histograms
+        hist_r = hist_r.flatten() / (hist_r.sum() + 1e-7)
+        hist_g = hist_g.flatten() / (hist_g.sum() + 1e-7)
+        hist_b = hist_b.flatten() / (hist_b.sum() + 1e-7)
+        
+        return np.concatenate([hist_r, hist_g, hist_b])
+    
+    def _extract_spatial_color_distribution(self, image: np.ndarray) -> np.ndarray:
+        """Extract where colors are located in the image (64 dimensions)"""
+        h, w = image.shape[:2]
+        features = []
+        
+        # Divide image into 8x8 grid and get dominant color in each region
+        for i in range(8):
+            for j in range(8):
+                y1, y2 = i * h // 8, (i + 1) * h // 8
+                x1, x2 = j * w // 8, (j + 1) * w // 8
+                region = image[y1:y2, x1:x2]
+                
+                # Get average color in this region
+                avg_color = np.mean(region.reshape(-1, 3), axis=0)
+                features.append(np.mean(avg_color) / 255.0)  # Single value per region
+        
+        return np.array(features, dtype=np.float32)
+    
+    def _extract_regional_edge_features(self, image: np.ndarray) -> np.ndarray:
+        """Extract edge patterns in different image regions (64 dimensions)"""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+        
+        h, w = edges.shape
+        features = []
+        
+        # Divide into 8x8 grid and calculate edge density in each region
+        for i in range(8):
+            for j in range(8):
+                y1, y2 = i * h // 8, (i + 1) * h // 8
+                x1, x2 = j * w // 8, (j + 1) * w // 8
+                region = edges[y1:y2, x1:x2]
+                
+                # Edge density in this region
+                edge_density = np.sum(region > 0) / region.size
+                features.append(edge_density)
+        
+        return np.array(features, dtype=np.float32)
+    
+    def _extract_detailed_texture_features(self, image: np.ndarray) -> np.ndarray:
+        """Extract detailed texture features (32 dimensions)"""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # Multiple gradient calculations for texture
+        grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        magnitude = np.sqrt(grad_x**2 + grad_y**2)
+        
+        # Texture features in 4x4 regions
+        h, w = gray.shape
+        features = []
+        
+        for i in range(4):
+            for j in range(4):
+                y1, y2 = i * h // 4, (i + 1) * h // 4
+                x1, x2 = j * w // 4, (j + 1) * w // 4
+                region_mag = magnitude[y1:y2, x1:x2]
+                
+                # Statistics for this region
+                features.extend([
+                    np.mean(region_mag),
+                    np.std(region_mag)
+                ])
+        
+        # Ensure exactly 32 features
+        return np.array(features[:32], dtype=np.float32)
+    
+    def _extract_image_statistics(self, image: np.ndarray) -> np.ndarray:
+        """Extract overall image statistics (32 dimensions)"""
+        # Convert to different color spaces for more features
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        features = []
+        
+        # RGB channel statistics
+        for channel in cv2.split(image):
+            features.extend([
+                np.mean(channel),
+                np.std(channel),
+                np.min(channel),
+                np.max(channel)
+            ])
+        
+        # HSV statistics 
+        for channel in cv2.split(hsv):
+            features.extend([
+                np.mean(channel),
+                np.std(channel)
+            ])
+        
+        # Overall image properties
+        features.extend([
+            np.mean(gray),
+            np.std(gray),
+            np.median(gray),
+            np.percentile(gray, 25),
+            np.percentile(gray, 75),
+            float(len(np.unique(gray)))  # Number of unique gray levels
+        ])
+        
+        # Ensure exactly 32 features
+        return np.array(features[:32], dtype=np.float32)
     
     def generate_image_embedding(self, image_bytes: bytes) -> np.ndarray:
         """
-        Generate CV-based embedding for image
+        Generate highly discriminative embedding for map art images
         
         Args:
             image_bytes: Raw image bytes
@@ -156,63 +328,45 @@ class CLIPProcessor:
                 # Resize to standard size for consistent features
                 cv_image = cv2.resize(cv_image, (224, 224))
                 
-                # Extract different types of features
-                color_features = self._extract_color_histogram(cv_image)      # 240 dims (60+40+40+30+30+30)
-                edge_features = self._extract_edge_features(cv_image)         # 16 dims  
-                texture_features = self._extract_texture_features(cv_image)   # 10 dims
-                spatial_features = self._extract_spatial_features(cv_image)   # 7 dims
+                # 1. Create a unique hash-based component (high discrimination)
+                # This ensures identical images get identical embeddings
+                image_hash = hashlib.md5(image_bytes).hexdigest()
+                hash_features = []
+                for i in range(128):  # Use 128 dimensions for hash
+                    char_idx = i % len(image_hash)
+                    hash_features.append(int(image_hash[char_idx], 16) / 15.0)  # Normalize 0-1
                 
-                # Weight different feature types for better discrimination
-                color_weight = 2.0      # Color is important for map art
-                edge_weight = 1.5       # Edges help distinguish structures
-                texture_weight = 1.0    # Texture provides detail info
-                spatial_weight = 0.5    # Spatial layout less critical
+                # 2. High-resolution color histogram (more discriminative)
+                color_features = self._extract_detailed_color_features(cv_image)  # 192 dims
                 
-                # Apply weights
-                color_features = color_features * color_weight
-                edge_features = edge_features * edge_weight
-                texture_features = texture_features * texture_weight
-                spatial_features = spatial_features * spatial_weight
+                # 3. Spatial position features (where colors are located)
+                spatial_features = self._extract_spatial_color_distribution(cv_image)  # 64 dims
                 
-                # Combine all features
+                # 4. Edge patterns in different regions 
+                edge_features = self._extract_regional_edge_features(cv_image)  # 64 dims
+                
+                # 5. Texture patterns
+                texture_features = self._extract_detailed_texture_features(cv_image)  # 32 dims
+                
+                # 6. Image statistics
+                stats_features = self._extract_image_statistics(cv_image)  # 32 dims
+                
+                # Combine all features (total: 128+192+64+64+32+32 = 512)
                 combined_features = np.concatenate([
+                    hash_features,
                     color_features,
+                    spatial_features, 
                     edge_features,
                     texture_features,
-                    spatial_features
+                    stats_features
                 ])
                 
-                # Current total: ~273 dimensions, need to pad to 512
-                # Pad or truncate to exactly 512 dimensions
-                if len(combined_features) < 512:
-                    # Pad with additional image statistics
-                    padding_size = 512 - len(combined_features)
-                    gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-                    
-                    # Add more discriminative statistical features as padding
-                    stats = []
-                    for i in range(padding_size):
-                        if i % 8 == 0:
-                            stats.append(np.mean(gray))
-                        elif i % 8 == 1:
-                            stats.append(np.std(gray))
-                        elif i % 8 == 2:
-                            stats.append(np.min(gray))
-                        elif i % 8 == 3:
-                            stats.append(np.max(gray))
-                        elif i % 8 == 4:
-                            stats.append(np.median(gray))
-                        elif i % 8 == 5:
-                            stats.append(np.percentile(gray, 25))
-                        elif i % 8 == 6:
-                            stats.append(np.percentile(gray, 75))
-                        else:
-                            # Add some randomness based on image content
-                            stats.append(np.sum(gray[::10, ::10]) % 256)
-                    
-                    combined_features = np.concatenate([combined_features, stats[:padding_size]])
-                else:
+                # Ensure exactly 512 dimensions
+                if len(combined_features) > 512:
                     combined_features = combined_features[:512]
+                elif len(combined_features) < 512:
+                    padding = np.zeros(512 - len(combined_features))
+                    combined_features = np.concatenate([combined_features, padding])
                 
                 # Normalize to unit vector
                 embedding = combined_features.astype(np.float32)
@@ -220,11 +374,11 @@ class CLIPProcessor:
                 if norm > 0:
                     embedding = embedding / norm
                 
-                self.logger.debug(f"Generated CV embedding with shape: {embedding.shape}")
+                self.logger.debug(f"Generated discriminative embedding with shape: {embedding.shape}")
                 return embedding
                 
         except Exception as e:
-            self.logger.error(f"Failed to generate CV embedding: {e}")
+            self.logger.error(f"Failed to generate discriminative embedding: {e}")
             raise ValueError(f"Image processing failed: {e}")
     
     def generate_text_embedding(self, text: str) -> np.ndarray:
